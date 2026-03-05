@@ -8,8 +8,6 @@ from PIL import Image
 import tensorflow as tf
 from tensorflow.keras.applications import (
     DenseNet121,
-    EfficientNetB3,
-    EfficientNetV2S,
     ConvNeXtTiny,
     MobileNetV2,
 )
@@ -18,41 +16,26 @@ from tensorflow.keras import layers, models
 # ── Custom ResNet18 (built from scratch) ─────────────────────────────────────
 
 def _residual_block(x, filters, stride=1):
-    """A single residual block with two 3×3 convolutions and a skip connection."""
     shortcut = x
-
     x = layers.Conv2D(filters, 3, strides=stride, padding="same", use_bias=False)(x)
     x = layers.BatchNormalization()(x)
     x = layers.ReLU()(x)
-
     x = layers.Conv2D(filters, 3, strides=1, padding="same", use_bias=False)(x)
     x = layers.BatchNormalization()(x)
-
-    # Projection shortcut when dimensions change
     if stride != 1 or shortcut.shape[-1] != filters:
         shortcut = layers.Conv2D(filters, 1, strides=stride, padding="same", use_bias=False)(shortcut)
         shortcut = layers.BatchNormalization()(shortcut)
-
     x = layers.Add()([x, shortcut])
     x = layers.ReLU()(x)
     return x
 
 
 def build_custom_resnet18(input_shape):
-    """Build a ResNet-18 from scratch (no pretrained weights).
-
-    Architecture: conv7×7 → [2,2,2,2] residual blocks → GlobalAvgPool
-    Total ~11M parameters with the classification head.
-    """
     inputs = layers.Input(shape=input_shape)
-
-    # Initial convolution (stem)
     x = layers.Conv2D(64, 7, strides=2, padding="same", use_bias=False)(inputs)
     x = layers.BatchNormalization()(x)
     x = layers.ReLU()(x)
     x = layers.MaxPooling2D(3, strides=2, padding="same")(x)
-
-    # Residual stages: [64, 128, 256, 512] × 2 blocks each
     for filters, stride in [(64, 1), (64, 1)]:
         x = _residual_block(x, 64, stride)
     for i, stride in enumerate([2, 1]):
@@ -61,24 +44,18 @@ def build_custom_resnet18(input_shape):
         x = _residual_block(x, 256, stride)
     for i, stride in enumerate([2, 1]):
         x = _residual_block(x, 512, stride)
-
     x = layers.GlobalAveragePooling2D()(x)
     return tf.keras.Model(inputs, x, name="custom_resnet18")
 
 
-# 26 ocular disorder classes (sorted alphabetically to match LabelEncoder ordering)
-CLASS_NAMES = [
-    "AMD", "Bleeding", "Blur Fundus", "Cataract", "Coats", "Cotton Wool Spots",
-    "Diabetic Retinopathy", "Drusen", "Glaucoma", "Hemorrhage",
-    "Healthy", "Hypertensive Retinopathy", "Laser Scars", "Macular Hole",
-    "Maculopathy", "Myopia", "Normal Fundus", "Optic Disc Pallor",
-    "Preretinal Hemorrhage", "Proliferative DR", "Retinal Detachment",
-    "Retinitis Pigmentosa", "Retinoblastoma", "STARE Normal",
-    "Toxoplasmosis", "Vessel Tortuosity",
-]
+# ── Configuration ────────────────────────────────────────────────────────────
 
-NUM_CLASSES = len(CLASS_NAMES)
-IMG_HEIGHT, IMG_WIDTH = 120, 150
+HEALTHY_CLASSES = {"Healthy", "Normal Fundus", "STARE Normal"}
+
+DISEASE_NAMES = ["AMD", "Cataract", "Diabetic Retinopathy", "Glaucoma", "Myopia"]
+NUM_DISEASES = len(DISEASE_NAMES)
+
+IMG_SIZE = 224
 
 # ── Model registry ───────────────────────────────────────────────────────────
 
@@ -95,30 +72,6 @@ MODEL_INFO = {
         "strengths": "Feature reuse, strong on small datasets, parameter efficient",
         "input_note": None,
     },
-    "EfficientNetB3": {
-        "builder": EfficientNetB3,
-        "year": 2019,
-        "params": "~12M base",
-        "description": (
-            "Uses compound scaling to balance network depth, width, and "
-            "resolution. Top performer on fundus classification benchmarks "
-            "with excellent accuracy-to-compute ratio."
-        ),
-        "strengths": "Best accuracy/FLOP ratio, compound scaling, state-of-the-art",
-        "input_note": None,
-    },
-    "EfficientNetV2S": {
-        "builder": EfficientNetV2S,
-        "year": 2021,
-        "params": "~21M base",
-        "description": (
-            "Successor to EfficientNet with fused convolutions in early "
-            "layers and progressive learning. Trains 5-11x faster than V1 "
-            "with better accuracy on medical imaging benchmarks."
-        ),
-        "strengths": "Faster training, improved accuracy over V1, progressive learning",
-        "input_note": None,
-    },
     "ConvNeXtTiny": {
         "builder": ConvNeXtTiny,
         "year": 2022,
@@ -126,8 +79,7 @@ MODEL_INFO = {
         "description": (
             "A modernized pure-CNN that incorporates Transformer-era design "
             "choices (large kernels, LayerNorm, GELU). Matches or beats "
-            "Vision Transformers while remaining fully convolutional. "
-            "Achieved 97.96% on retinal OCT classification."
+            "Vision Transformers while remaining fully convolutional."
         ),
         "strengths": "State-of-the-art CNN, Transformer-level accuracy, modern design",
         "input_note": None,
@@ -145,15 +97,14 @@ MODEL_INFO = {
         "input_note": None,
     },
     "ResNet18 (Custom)": {
-        "builder": None,  # Built from scratch — see build_custom_resnet18()
+        "builder": None,
         "year": 2015,
         "params": "~11M",
         "description": (
             "Hand-coded ResNet-18 built entirely from scratch using Keras "
             "layers — no pretrained weights. Implements the original "
             "residual-learning framework (He et al., 2015) with skip "
-            "connections that enable training of deeper networks. This is "
-            "our own implementation, not imported from tf.keras.applications."
+            "connections that enable training of deeper networks."
         ),
         "strengths": "Custom-built, interpretable architecture, residual learning pioneer",
         "input_note": "custom",
@@ -204,7 +155,6 @@ WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
 
 
 def load_pytorch_results() -> dict | None:
-    """Load pre-computed PyTorch model results from JSON."""
     if os.path.exists(PYTORCH_RESULTS_PATH):
         with open(PYTORCH_RESULTS_PATH) as f:
             return json.load(f)
@@ -212,36 +162,37 @@ def load_pytorch_results() -> dict | None:
 
 
 def load_tf_results() -> dict | None:
-    """Load pre-computed TensorFlow training results from JSON."""
     if os.path.exists(TF_RESULTS_PATH):
         with open(TF_RESULTS_PATH) as f:
             return json.load(f)
     return None
 
 
-def _weight_path(model_name: str) -> str:
-    """Return the path to saved .keras weights for a model."""
+def _weight_path(model_name: str, stage: str) -> str:
+    """Return the path to saved .keras weights for a model and stage."""
     safe = model_name.replace(" ", "_").replace("(", "").replace(")", "")
-    return os.path.join(WEIGHTS_DIR, f"{safe}.keras")
+    return os.path.join(WEIGHTS_DIR, f"{stage}_{safe}.keras")
 
 
 def has_trained_weights(model_name: str) -> bool:
-    """Check if trained weights exist for a model."""
-    return os.path.exists(_weight_path(model_name))
+    """Check if both binary and disease weights exist for a model."""
+    return (
+        os.path.exists(_weight_path(model_name, "binary"))
+        and os.path.exists(_weight_path(model_name, "disease"))
+    )
 
 
 @st.cache_resource
-def load_model(model_name: str):
+def load_model(model_name: str, stage: str):
     """Load a trained model from saved weights."""
-    path = _weight_path(model_name)
-    model = tf.keras.models.load_model(path)
-    return model
+    path = _weight_path(model_name, stage)
+    return tf.keras.models.load_model(path)
 
 
 def preprocess_image(image: Image.Image) -> np.ndarray:
     """Resize and normalize a fundus image for model input."""
     img = image.convert("RGB")
-    img = img.resize((IMG_WIDTH, IMG_HEIGHT))
+    img = img.resize((IMG_SIZE, IMG_SIZE))
     return np.array(img, dtype=np.float32) / 255.0
 
 
@@ -254,16 +205,45 @@ def enhance_contrast(img_array: np.ndarray, contrast: int = 40) -> np.ndarray:
     return enhanced.astype(np.float32) / 255.0
 
 
-def run_inference(model_name: str, input_batch: np.ndarray) -> dict:
-    """Run inference and return predictions with timing info."""
-    model = load_model(model_name)
-    # Warm-up run (first call has overhead)
-    model.predict(input_batch, verbose=0)
-    # Timed run
+def run_two_stage_inference(model_name: str, input_batch: np.ndarray) -> dict:
+    """Run the two-stage pipeline: binary first, then disease if unhealthy."""
+    # Stage 1: Binary
+    binary_model = load_model(model_name, "binary")
+    binary_model.predict(input_batch, verbose=0)  # warm-up
     start = time.perf_counter()
-    predictions = model.predict(input_batch, verbose=0)
-    elapsed = time.perf_counter() - start
-    return {"predictions": predictions[0], "time_ms": elapsed * 1000}
+    binary_pred = binary_model.predict(input_batch, verbose=0)
+    binary_time = (time.perf_counter() - start) * 1000
+
+    # binary_pred shape is (1, 1) with sigmoid — probability of "Unhealthy"
+    # Classes are ["Healthy", "Unhealthy"] alphabetically, so index 0=Healthy, 1=Unhealthy
+    # With sigmoid output (1 unit), the value is P(Unhealthy)
+    unhealthy_prob = float(binary_pred[0][0])
+    healthy_prob = 1.0 - unhealthy_prob
+    is_unhealthy = unhealthy_prob > 0.5
+
+    result = {
+        "is_unhealthy": is_unhealthy,
+        "healthy_prob": healthy_prob,
+        "unhealthy_prob": unhealthy_prob,
+        "binary_time_ms": binary_time,
+        "disease_predictions": None,
+        "disease_time_ms": 0,
+        "total_time_ms": binary_time,
+    }
+
+    # Stage 2: Disease classification (only if unhealthy)
+    if is_unhealthy:
+        disease_model = load_model(model_name, "disease")
+        disease_model.predict(input_batch, verbose=0)  # warm-up
+        start = time.perf_counter()
+        disease_pred = disease_model.predict(input_batch, verbose=0)
+        disease_time = (time.perf_counter() - start) * 1000
+
+        result["disease_predictions"] = disease_pred[0]
+        result["disease_time_ms"] = disease_time
+        result["total_time_ms"] = binary_time + disease_time
+
+    return result
 
 
 # ── Streamlit UI ─────────────────────────────────────────────────────────────
@@ -272,10 +252,11 @@ st.set_page_config(page_title="Eye Disease Classifier", layout="wide")
 
 st.title("Automated Eye Disease Detection — Model Comparison")
 st.markdown(
-    "Upload a retinal fundus image and compare how **6 TensorFlow architectures** "
-    "(including a **custom-built ResNet18**) "
-    f"classify it across **{NUM_CLASSES} ocular disorder categories**, plus "
-    "**3 PyTorch models** with pre-computed benchmark results from Colab."
+    "Upload a retinal fundus image and compare how **4 TensorFlow architectures** "
+    "(including a **custom-built ResNet18**) classify it using a **two-stage pipeline**:\n\n"
+    "**Stage 1:** Healthy vs Unhealthy  \n"
+    "**Stage 2:** If unhealthy → predict the specific disease "
+    f"(AMD, Cataract, Diabetic Retinopathy, Glaucoma, Myopia)"
 )
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -292,7 +273,7 @@ if not models_with_weights:
     )
 
 for name in models_with_weights:
-    if st.sidebar.checkbox(name, value=(name in ("DenseNet121", "EfficientNetV2S", "ConvNeXtTiny"))):
+    if st.sidebar.checkbox(name, value=(name in ("DenseNet121", "ConvNeXtTiny"))):
         selected_models.append(name)
 
 if models_without_weights:
@@ -352,30 +333,54 @@ if uploaded_file is not None and selected_models:
             (i) / len(selected_models),
             text=f"Running {model_name}...",
         )
-        results[model_name] = run_inference(model_name, input_batch)
+        results[model_name] = run_two_stage_inference(model_name, input_batch)
     progress_bar.progress(1.0, text="All models complete!")
 
     # ── Side-by-side predictions ─────────────────────────────────────────────
-    st.subheader("Predictions by Model")
+    st.subheader("Stage 1 — Healthy vs Unhealthy")
 
     cols = st.columns(len(selected_models))
     for col, model_name in zip(cols, selected_models):
-        preds = results[model_name]["predictions"]
-        pred_idx = int(np.argmax(preds))
-        conf = float(preds[pred_idx])
-        elapsed = results[model_name]["time_ms"]
-
+        res = results[model_name]
         with col:
             st.markdown(f"### {model_name}")
-            st.metric("Predicted Class", CLASS_NAMES[pred_idx])
-            st.metric("Confidence", f"{conf:.2%}")
-            st.metric("Inference Time", f"{elapsed:.1f} ms")
+            if res["is_unhealthy"]:
+                st.error(f"Unhealthy ({res['unhealthy_prob']:.1%})")
+            else:
+                st.success(f"Healthy ({res['healthy_prob']:.1%})")
+            st.progress(res["unhealthy_prob"], text=f"Unhealthy: {res['unhealthy_prob']:.1%}")
+            st.progress(res["healthy_prob"], text=f"Healthy: {res['healthy_prob']:.1%}")
+            st.metric("Binary Inference", f"{res['binary_time_ms']:.1f} ms")
 
-            st.markdown("**Top 5:**")
-            top5 = np.argsort(preds)[::-1][:5]
-            for rank, idx in enumerate(top5, 1):
-                prob = float(preds[idx])
-                st.progress(prob, text=f"{rank}. {CLASS_NAMES[idx]} — {prob:.2%}")
+    # ── Stage 2: Disease prediction ──────────────────────────────────────────
+    any_unhealthy = any(results[m]["is_unhealthy"] for m in selected_models)
+
+    if any_unhealthy:
+        st.divider()
+        st.subheader("Stage 2 — Disease Prediction (Unhealthy Images)")
+
+        cols = st.columns(len(selected_models))
+        for col, model_name in zip(cols, selected_models):
+            res = results[model_name]
+            with col:
+                st.markdown(f"### {model_name}")
+                if not res["is_unhealthy"]:
+                    st.info("Classified as Healthy — no disease prediction.")
+                    continue
+
+                preds = res["disease_predictions"]
+                pred_idx = int(np.argmax(preds))
+                conf = float(preds[pred_idx])
+
+                st.metric("Predicted Disease", DISEASE_NAMES[pred_idx])
+                st.metric("Confidence", f"{conf:.2%}")
+                st.metric("Disease Inference", f"{res['disease_time_ms']:.1f} ms")
+
+                st.markdown("**Top 5 Diseases:**")
+                top5 = np.argsort(preds)[::-1][:5]
+                for rank, idx in enumerate(top5, 1):
+                    prob = float(preds[idx])
+                    st.progress(prob, text=f"{rank}. {DISEASE_NAMES[idx]} — {prob:.2%}")
 
     # ── Comparison table ─────────────────────────────────────────────────────
     st.divider()
@@ -383,61 +388,81 @@ if uploaded_file is not None and selected_models:
 
     summary_data = []
     for model_name in selected_models:
-        preds = results[model_name]["predictions"]
-        pred_idx = int(np.argmax(preds))
-        conf = float(preds[pred_idx])
-        top3 = np.argsort(preds)[::-1][:3]
-        summary_data.append({
+        res = results[model_name]
+        row = {
             "Model": model_name,
             "Year": MODEL_INFO[model_name]["year"],
-            "Prediction": CLASS_NAMES[pred_idx],
-            "Confidence": f"{conf:.2%}",
-            "Inference (ms)": f"{results[model_name]['time_ms']:.1f}",
-            "Top-3": ", ".join(CLASS_NAMES[i] for i in top3),
+            "Status": "Unhealthy" if res["is_unhealthy"] else "Healthy",
+            "Confidence": f"{max(res['healthy_prob'], res['unhealthy_prob']):.1%}",
+            "Disease": "—",
+            "Disease Conf.": "—",
+            "Total Time (ms)": f"{res['total_time_ms']:.1f}",
             "Parameters": MODEL_INFO[model_name]["params"],
-        })
+        }
+        if res["is_unhealthy"] and res["disease_predictions"] is not None:
+            preds = res["disease_predictions"]
+            pred_idx = int(np.argmax(preds))
+            row["Disease"] = DISEASE_NAMES[pred_idx]
+            row["Disease Conf."] = f"{float(preds[pred_idx]):.1%}"
+        summary_data.append(row)
 
     st.table(summary_data)
 
     # ── Agreement analysis ───────────────────────────────────────────────────
     if len(selected_models) > 1:
         st.subheader("Model Agreement")
-        all_preds = [
-            CLASS_NAMES[int(np.argmax(results[m]["predictions"]))]
+        binary_preds = [
+            "Unhealthy" if results[m]["is_unhealthy"] else "Healthy"
             for m in selected_models
         ]
-        unique_preds = set(all_preds)
-        if len(unique_preds) == 1:
+        unique_binary = set(binary_preds)
+        if len(unique_binary) == 1:
             st.success(
-                f"All {len(selected_models)} models agree: **{all_preds[0]}**"
+                f"All {len(selected_models)} models agree: **{binary_preds[0]}**"
             )
         else:
             st.warning(
-                f"Models disagree — {len(unique_preds)} distinct predictions: "
-                f"{', '.join(f'**{p}**' for p in unique_preds)}"
-            )
-            st.markdown(
-                "Disagreement may indicate an ambiguous or challenging image. "
-                "Consider the consensus of the majority or the model with "
-                "highest confidence."
+                f"Models disagree on healthy/unhealthy classification."
             )
 
-    # ── TF benchmark results (from Colab training) ─────────────────────────
+        # Disease agreement (for models that predicted unhealthy)
+        unhealthy_models = [m for m in selected_models if results[m]["is_unhealthy"]]
+        if len(unhealthy_models) > 1:
+            disease_preds = [
+                DISEASE_NAMES[int(np.argmax(results[m]["disease_predictions"]))]
+                for m in unhealthy_models
+            ]
+            unique_diseases = set(disease_preds)
+            if len(unique_diseases) == 1:
+                st.success(
+                    f"All unhealthy models agree on disease: **{disease_preds[0]}**"
+                )
+            else:
+                st.warning(
+                    f"Models disagree on disease — {len(unique_diseases)} predictions: "
+                    f"{', '.join(f'**{p}**' for p in unique_diseases)}"
+                )
+
+    # ── TF benchmark results ─────────────────────────────────────────────────
     tf_results = load_tf_results()
     if tf_results:
         st.divider()
-        st.subheader("TensorFlow Models — Training Benchmark Results")
-        st.caption("Test-set metrics from Colab training.")
-        tf_bench_cols = st.columns(min(len(tf_results), 3))
-        tf_items = list(tf_results.items())
-        for i, (mname, mres) in enumerate(tf_items):
-            with tf_bench_cols[i % len(tf_bench_cols)]:
-                st.markdown(f"**{mname}**")
-                st.metric("Test Accuracy", f"{mres['test_accuracy']:.2%}")
-                st.metric("Inference", f"{mres['inference_ms']:.1f} ms")
-                st.caption(f"Trained {mres['epochs_trained']} epochs, best val acc {mres['best_val_accuracy']:.2%}")
+        st.subheader("Training Benchmark Results")
 
-    # ── PyTorch model results (pre-computed from Colab) ─────────────────────
+        for stage_key, stage_label in [("binary", "Binary (Healthy vs Unhealthy)"), ("disease", "Disease Classification")]:
+            stage_data = tf_results.get(stage_key)
+            if not stage_data:
+                continue
+            st.markdown(f"#### {stage_label}")
+            bench_cols = st.columns(min(len(stage_data), 4))
+            for i, (mname, mres) in enumerate(stage_data.items()):
+                with bench_cols[i % len(bench_cols)]:
+                    st.markdown(f"**{mname}**")
+                    st.metric("Test Accuracy", f"{mres['test_accuracy']:.2%}")
+                    st.metric("Inference", f"{mres['inference_ms']:.1f} ms")
+                    st.caption(f"Trained {mres['epochs_trained']} epochs, best val acc {mres['best_val_accuracy']:.2%}")
+
+    # ── PyTorch model results ────────────────────────────────────────────────
     st.divider()
     st.subheader("PyTorch Models — Pre-computed Results from Colab")
 
@@ -483,7 +508,6 @@ if uploaded_file is not None and selected_models:
                 else:
                     st.metric("Inference Time", inf_ms)
 
-        # Comparison table for PyTorch models
         pt_summary = []
         for model_name, info in PYTORCH_MODEL_INFO.items():
             r = pytorch_results.get(model_name, {})
