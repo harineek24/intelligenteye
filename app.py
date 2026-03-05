@@ -32,6 +32,7 @@ IMG_HEIGHT, IMG_WIDTH = 120, 150
 MODEL_INFO = {
     "DenseNet121": {
         "builder": DenseNet121,
+        "year": 2017,
         "params": "~7M base",
         "description": (
             "Dense connectivity where each layer receives features from all "
@@ -43,6 +44,7 @@ MODEL_INFO = {
     },
     "EfficientNetB3": {
         "builder": EfficientNetB3,
+        "year": 2019,
         "params": "~12M base",
         "description": (
             "Uses compound scaling to balance network depth, width, and "
@@ -54,6 +56,7 @@ MODEL_INFO = {
     },
     "EfficientNetV2S": {
         "builder": EfficientNetV2S,
+        "year": 2021,
         "params": "~21M base",
         "description": (
             "Successor to EfficientNet with fused convolutions in early "
@@ -65,6 +68,7 @@ MODEL_INFO = {
     },
     "ConvNeXtTiny": {
         "builder": ConvNeXtTiny,
+        "year": 2022,
         "params": "~28M base",
         "description": (
             "A modernized pure-CNN that incorporates Transformer-era design "
@@ -77,6 +81,7 @@ MODEL_INFO = {
     },
     "MobileNetV2": {
         "builder": MobileNetV2,
+        "year": 2018,
         "params": "~3.4M base",
         "description": (
             "Depthwise separable convolutions with inverted residuals for "
@@ -152,7 +157,7 @@ st.set_page_config(page_title="Eye Disease Classifier", layout="wide")
 
 st.title("Automated Eye Disease Detection — Model Comparison")
 st.markdown(
-    "Upload a retinal fundus image and compare how **6 different architectures** "
+    "Upload a retinal fundus image and compare how **5 different architectures** "
     f"classify it across **{NUM_CLASSES} ocular disorder categories**."
 )
 
@@ -170,8 +175,8 @@ if not selected_models:
 st.sidebar.divider()
 st.sidebar.header("Model Reference")
 for name, info in MODEL_INFO.items():
-    with st.sidebar.expander(name):
-        st.markdown(f"**Parameters:** {info['params']}")
+    with st.sidebar.expander(f"{name} ({info['year']})"):
+        st.markdown(f"**Year:** {info['year']}  |  **Parameters:** {info['params']}")
         st.markdown(f"**Strengths:** {info['strengths']}")
         st.markdown(info["description"])
 
@@ -243,6 +248,7 @@ if uploaded_file is not None and selected_models:
         top3 = np.argsort(preds)[::-1][:3]
         summary_data.append({
             "Model": model_name,
+            "Year": MODEL_INFO[model_name]["year"],
             "Prediction": CLASS_NAMES[pred_idx],
             "Confidence": f"{conf:.2%}",
             "Inference (ms)": f"{results[model_name]['time_ms']:.1f}",
