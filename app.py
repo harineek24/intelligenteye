@@ -1,3 +1,5 @@
+import json
+import os
 import streamlit as st
 import numpy as np
 import cv2
@@ -93,6 +95,54 @@ MODEL_INFO = {
     },
 }
 
+# ── PyTorch models (pre-computed results from Colab) ────────────────────────
+
+PYTORCH_MODEL_INFO = {
+    "ConvNeXtV2-Tiny": {
+        "year": 2023,
+        "params": "~28.6M base",
+        "description": (
+            "Successor to ConvNeXt with Global Response Normalization (GRN) "
+            "and MAE-based self-supervised pretraining. Best single model on "
+            "multi-label retinal classification benchmarks (AUC 0.9967)."
+        ),
+        "strengths": "GRN layers, self-supervised pretraining, top retinal benchmark results",
+        "timm_id": "convnextv2_tiny.fcmae_ft_in22k_in1k",
+    },
+    "SwinV2-Tiny": {
+        "year": 2022,
+        "params": "~28M base",
+        "description": (
+            "Hierarchical Vision Transformer with shifted-window attention "
+            "and log-spaced continuous position bias. Best mean rank across "
+            "all retinal tasks in a 2025 systematic evaluation."
+        ),
+        "strengths": "Best consistency across retinal tasks, hierarchical features, scalable",
+        "timm_id": "swinv2_tiny_window8_256",
+    },
+    "MaxViT-Tiny": {
+        "year": 2022,
+        "params": "~31M base",
+        "description": (
+            "Multi-axis Vision Transformer combining blocked local attention "
+            "and dilated global attention with MBConv. Used in MaxGlaViT "
+            "(2025) for glaucoma staging from fundus images."
+        ),
+        "strengths": "Local + global attention, efficient multi-scale, strong on fundus",
+        "timm_id": "maxvit_tiny_tf_224.in1k",
+    },
+}
+
+PYTORCH_RESULTS_PATH = os.path.join(os.path.dirname(__file__), "pytorch_results.json")
+
+
+def load_pytorch_results() -> dict | None:
+    """Load pre-computed PyTorch model results from JSON."""
+    if os.path.exists(PYTORCH_RESULTS_PATH):
+        with open(PYTORCH_RESULTS_PATH) as f:
+            return json.load(f)
+    return None
+
 
 @st.cache_resource
 def build_model(model_name: str):
@@ -157,8 +207,9 @@ st.set_page_config(page_title="Eye Disease Classifier", layout="wide")
 
 st.title("Automated Eye Disease Detection — Model Comparison")
 st.markdown(
-    "Upload a retinal fundus image and compare how **5 different architectures** "
-    f"classify it across **{NUM_CLASSES} ocular disorder categories**."
+    "Upload a retinal fundus image and compare how **5 TensorFlow architectures** "
+    f"classify it across **{NUM_CLASSES} ocular disorder categories**, plus "
+    "**3 PyTorch models** with pre-computed benchmark results from Colab."
 )
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
@@ -173,12 +224,21 @@ if not selected_models:
     st.sidebar.warning("Select at least one model.")
 
 st.sidebar.divider()
-st.sidebar.header("Model Reference")
+st.sidebar.header("Model Reference — TensorFlow (Live)")
 for name, info in MODEL_INFO.items():
     with st.sidebar.expander(f"{name} ({info['year']})"):
         st.markdown(f"**Year:** {info['year']}  |  **Parameters:** {info['params']}")
         st.markdown(f"**Strengths:** {info['strengths']}")
         st.markdown(info["description"])
+
+st.sidebar.divider()
+st.sidebar.header("Model Reference — PyTorch (Colab)")
+for name, info in PYTORCH_MODEL_INFO.items():
+    with st.sidebar.expander(f"{name} ({info['year']})"):
+        st.markdown(f"**Year:** {info['year']}  |  **Parameters:** {info['params']}")
+        st.markdown(f"**Strengths:** {info['strengths']}")
+        st.markdown(info["description"])
+        st.caption(f"`timm` model ID: `{info['timm_id']}`")
 
 # ── Main content ─────────────────────────────────────────────────────────────
 
@@ -280,6 +340,68 @@ if uploaded_file is not None and selected_models:
                 "Consider the consensus of the majority or the model with "
                 "highest confidence."
             )
+
+    # ── PyTorch model results (pre-computed from Colab) ─────────────────────
+    st.divider()
+    st.subheader("PyTorch Models — Pre-computed Results from Colab")
+
+    pytorch_results = load_pytorch_results()
+    if pytorch_results is None:
+        st.info(
+            "No PyTorch results found. Run the `pytorch_fundus_eval.ipynb` "
+            "notebook on Google Colab to generate `pytorch_results.json`, "
+            "then place it in the project root."
+        )
+    else:
+        st.markdown(
+            "These results were generated on **Google Colab** using PyTorch + "
+            "`timm`. They show benchmark metrics on the test set — not live "
+            "inference on the uploaded image."
+        )
+
+        pt_cols = st.columns(len(PYTORCH_MODEL_INFO))
+        for col, (model_name, info) in zip(pt_cols, PYTORCH_MODEL_INFO.items()):
+            model_results = pytorch_results.get(model_name, {})
+            with col:
+                st.markdown(f"### {model_name}")
+                st.caption(f"{info['year']} · {info['params']}")
+                accuracy = model_results.get("accuracy", "N/A")
+                f1 = model_results.get("f1_weighted", "N/A")
+                auc = model_results.get("auc_macro", "N/A")
+                inf_ms = model_results.get("inference_ms", "N/A")
+
+                if isinstance(accuracy, (int, float)):
+                    st.metric("Test Accuracy", f"{accuracy:.2%}")
+                else:
+                    st.metric("Test Accuracy", accuracy)
+                if isinstance(f1, (int, float)):
+                    st.metric("Weighted F1", f"{f1:.4f}")
+                else:
+                    st.metric("Weighted F1", f1)
+                if isinstance(auc, (int, float)):
+                    st.metric("Macro AUC", f"{auc:.4f}")
+                else:
+                    st.metric("Macro AUC", auc)
+                if isinstance(inf_ms, (int, float)):
+                    st.metric("Inference Time", f"{inf_ms:.1f} ms")
+                else:
+                    st.metric("Inference Time", inf_ms)
+
+        # Comparison table for PyTorch models
+        pt_summary = []
+        for model_name, info in PYTORCH_MODEL_INFO.items():
+            r = pytorch_results.get(model_name, {})
+            acc = r.get("accuracy", "N/A")
+            pt_summary.append({
+                "Model": model_name,
+                "Framework": "PyTorch",
+                "Year": info["year"],
+                "Parameters": info["params"],
+                "Accuracy": f"{acc:.2%}" if isinstance(acc, (int, float)) else acc,
+                "F1 (weighted)": f"{r.get('f1_weighted', 'N/A'):.4f}" if isinstance(r.get("f1_weighted"), (int, float)) else "N/A",
+                "AUC (macro)": f"{r.get('auc_macro', 'N/A'):.4f}" if isinstance(r.get("auc_macro"), (int, float)) else "N/A",
+            })
+        st.table(pt_summary)
 
 elif uploaded_file is None:
     st.info("Please upload a retinal fundus image to get started.")
