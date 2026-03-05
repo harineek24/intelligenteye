@@ -15,6 +15,57 @@ from tensorflow.keras.applications import (
 )
 from tensorflow.keras import layers, models
 
+# ── Custom ResNet18 (built from scratch) ─────────────────────────────────────
+
+def _residual_block(x, filters, stride=1):
+    """A single residual block with two 3×3 convolutions and a skip connection."""
+    shortcut = x
+
+    x = layers.Conv2D(filters, 3, strides=stride, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+
+    x = layers.Conv2D(filters, 3, strides=1, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+
+    # Projection shortcut when dimensions change
+    if stride != 1 or shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(filters, 1, strides=stride, padding="same", use_bias=False)(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
+
+    x = layers.Add()([x, shortcut])
+    x = layers.ReLU()(x)
+    return x
+
+
+def build_custom_resnet18(input_shape):
+    """Build a ResNet-18 from scratch (no pretrained weights).
+
+    Architecture: conv7×7 → [2,2,2,2] residual blocks → GlobalAvgPool
+    Total ~11M parameters with the classification head.
+    """
+    inputs = layers.Input(shape=input_shape)
+
+    # Initial convolution (stem)
+    x = layers.Conv2D(64, 7, strides=2, padding="same", use_bias=False)(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    x = layers.MaxPooling2D(3, strides=2, padding="same")(x)
+
+    # Residual stages: [64, 128, 256, 512] × 2 blocks each
+    for filters, stride in [(64, 1), (64, 1)]:
+        x = _residual_block(x, 64, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 128, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 256, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 512, stride)
+
+    x = layers.GlobalAveragePooling2D()(x)
+    return tf.keras.Model(inputs, x, name="custom_resnet18")
+
+
 # 26 ocular disorder classes (sorted alphabetically to match LabelEncoder ordering)
 CLASS_NAMES = [
     "AMD", "Bleeding", "Blur Fundus", "Cataract", "Coats", "Cotton Wool Spots",
@@ -93,6 +144,20 @@ MODEL_INFO = {
         "strengths": "Ultra-lightweight, fast inference, mobile-friendly",
         "input_note": None,
     },
+    "ResNet18 (Custom)": {
+        "builder": None,  # Built from scratch — see build_custom_resnet18()
+        "year": 2015,
+        "params": "~11M",
+        "description": (
+            "Hand-coded ResNet-18 built entirely from scratch using Keras "
+            "layers — no pretrained weights. Implements the original "
+            "residual-learning framework (He et al., 2015) with skip "
+            "connections that enable training of deeper networks. This is "
+            "our own implementation, not imported from tf.keras.applications."
+        ),
+        "strengths": "Custom-built, interpretable architecture, residual learning pioneer",
+        "input_note": "custom",
+    },
 }
 
 # ── PyTorch models (pre-computed results from Colab) ────────────────────────
@@ -148,16 +213,24 @@ def load_pytorch_results() -> dict | None:
 def build_model(model_name: str):
     """Build a classifier with the given backbone, pretrained on ImageNet."""
     info = MODEL_INFO[model_name]
-    base_model = info["builder"](
-        weights="imagenet",
-        include_top=False,
-        input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
-    )
-    base_model.trainable = False
+
+    if info.get("input_note") == "custom":
+        # Custom ResNet18 — built from scratch, no pretrained weights.
+        # The base already ends with GlobalAveragePooling2D.
+        base_model = build_custom_resnet18((IMG_HEIGHT, IMG_WIDTH, 3))
+        head_layers = []
+    else:
+        base_model = info["builder"](
+            weights="imagenet",
+            include_top=False,
+            input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
+        )
+        base_model.trainable = False
+        head_layers = [layers.GlobalAveragePooling2D()]
 
     model = models.Sequential([
         base_model,
-        layers.GlobalAveragePooling2D(),
+        *head_layers,
         layers.BatchNormalization(),
         layers.Dropout(0.3),
         layers.Dense(256, activation="relu"),
@@ -207,7 +280,8 @@ st.set_page_config(page_title="Eye Disease Classifier", layout="wide")
 
 st.title("Automated Eye Disease Detection — Model Comparison")
 st.markdown(
-    "Upload a retinal fundus image and compare how **5 TensorFlow architectures** "
+    "Upload a retinal fundus image and compare how **6 TensorFlow architectures** "
+    "(including a **custom-built ResNet18**) "
     f"classify it across **{NUM_CLASSES} ocular disorder categories**, plus "
     "**3 PyTorch models** with pre-computed benchmark results from Colab."
 )
