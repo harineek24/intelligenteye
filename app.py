@@ -15,6 +15,57 @@ from tensorflow.keras.applications import (
 )
 from tensorflow.keras import layers, models
 
+# ── Custom ResNet18 (built from scratch) ─────────────────────────────────────
+
+def _residual_block(x, filters, stride=1):
+    """A single residual block with two 3×3 convolutions and a skip connection."""
+    shortcut = x
+
+    x = layers.Conv2D(filters, 3, strides=stride, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+
+    x = layers.Conv2D(filters, 3, strides=1, padding="same", use_bias=False)(x)
+    x = layers.BatchNormalization()(x)
+
+    # Projection shortcut when dimensions change
+    if stride != 1 or shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(filters, 1, strides=stride, padding="same", use_bias=False)(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
+
+    x = layers.Add()([x, shortcut])
+    x = layers.ReLU()(x)
+    return x
+
+
+def build_custom_resnet18(input_shape):
+    """Build a ResNet-18 from scratch (no pretrained weights).
+
+    Architecture: conv7×7 → [2,2,2,2] residual blocks → GlobalAvgPool
+    Total ~11M parameters with the classification head.
+    """
+    inputs = layers.Input(shape=input_shape)
+
+    # Initial convolution (stem)
+    x = layers.Conv2D(64, 7, strides=2, padding="same", use_bias=False)(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
+    x = layers.MaxPooling2D(3, strides=2, padding="same")(x)
+
+    # Residual stages: [64, 128, 256, 512] × 2 blocks each
+    for filters, stride in [(64, 1), (64, 1)]:
+        x = _residual_block(x, 64, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 128, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 256, stride)
+    for i, stride in enumerate([2, 1]):
+        x = _residual_block(x, 512, stride)
+
+    x = layers.GlobalAveragePooling2D()(x)
+    return tf.keras.Model(inputs, x, name="custom_resnet18")
+
+
 # 26 ocular disorder classes (sorted alphabetically to match LabelEncoder ordering)
 CLASS_NAMES = [
     "AMD", "Bleeding", "Blur Fundus", "Cataract", "Coats", "Cotton Wool Spots",
@@ -93,6 +144,20 @@ MODEL_INFO = {
         "strengths": "Ultra-lightweight, fast inference, mobile-friendly",
         "input_note": None,
     },
+    "ResNet18 (Custom)": {
+        "builder": None,  # Built from scratch — see build_custom_resnet18()
+        "year": 2015,
+        "params": "~11M",
+        "description": (
+            "Hand-coded ResNet-18 built entirely from scratch using Keras "
+            "layers — no pretrained weights. Implements the original "
+            "residual-learning framework (He et al., 2015) with skip "
+            "connections that enable training of deeper networks. This is "
+            "our own implementation, not imported from tf.keras.applications."
+        ),
+        "strengths": "Custom-built, interpretable architecture, residual learning pioneer",
+        "input_note": "custom",
+    },
 }
 
 # ── PyTorch models (pre-computed results from Colab) ────────────────────────
@@ -134,6 +199,8 @@ PYTORCH_MODEL_INFO = {
 }
 
 PYTORCH_RESULTS_PATH = os.path.join(os.path.dirname(__file__), "pytorch_results.json")
+TF_RESULTS_PATH = os.path.join(os.path.dirname(__file__), "weights", "tf_results.json")
+WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), "weights")
 
 
 def load_pytorch_results() -> dict | None:
@@ -144,32 +211,30 @@ def load_pytorch_results() -> dict | None:
     return None
 
 
+def load_tf_results() -> dict | None:
+    """Load pre-computed TensorFlow training results from JSON."""
+    if os.path.exists(TF_RESULTS_PATH):
+        with open(TF_RESULTS_PATH) as f:
+            return json.load(f)
+    return None
+
+
+def _weight_path(model_name: str) -> str:
+    """Return the path to saved .keras weights for a model."""
+    safe = model_name.replace(" ", "_").replace("(", "").replace(")", "")
+    return os.path.join(WEIGHTS_DIR, f"{safe}.keras")
+
+
+def has_trained_weights(model_name: str) -> bool:
+    """Check if trained weights exist for a model."""
+    return os.path.exists(_weight_path(model_name))
+
+
 @st.cache_resource
-def build_model(model_name: str):
-    """Build a classifier with the given backbone, pretrained on ImageNet."""
-    info = MODEL_INFO[model_name]
-    base_model = info["builder"](
-        weights="imagenet",
-        include_top=False,
-        input_shape=(IMG_HEIGHT, IMG_WIDTH, 3),
-    )
-    base_model.trainable = False
-
-    model = models.Sequential([
-        base_model,
-        layers.GlobalAveragePooling2D(),
-        layers.BatchNormalization(),
-        layers.Dropout(0.3),
-        layers.Dense(256, activation="relu"),
-        layers.Dropout(0.3),
-        layers.Dense(NUM_CLASSES, activation="softmax"),
-    ])
-
-    model.compile(
-        optimizer="adam",
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
+def load_model(model_name: str):
+    """Load a trained model from saved weights."""
+    path = _weight_path(model_name)
+    model = tf.keras.models.load_model(path)
     return model
 
 
@@ -191,7 +256,7 @@ def enhance_contrast(img_array: np.ndarray, contrast: int = 40) -> np.ndarray:
 
 def run_inference(model_name: str, input_batch: np.ndarray) -> dict:
     """Run inference and return predictions with timing info."""
-    model = build_model(model_name)
+    model = load_model(model_name)
     # Warm-up run (first call has overhead)
     model.predict(input_batch, verbose=0)
     # Timed run
@@ -207,7 +272,8 @@ st.set_page_config(page_title="Eye Disease Classifier", layout="wide")
 
 st.title("Automated Eye Disease Detection — Model Comparison")
 st.markdown(
-    "Upload a retinal fundus image and compare how **5 TensorFlow architectures** "
+    "Upload a retinal fundus image and compare how **6 TensorFlow architectures** "
+    "(including a **custom-built ResNet18**) "
     f"classify it across **{NUM_CLASSES} ocular disorder categories**, plus "
     "**3 PyTorch models** with pre-computed benchmark results from Colab."
 )
@@ -216,11 +282,26 @@ st.markdown(
 
 st.sidebar.header("Select Models to Compare")
 selected_models = []
-for name in MODEL_INFO:
+models_with_weights = [name for name in MODEL_INFO if has_trained_weights(name)]
+models_without_weights = [name for name in MODEL_INFO if not has_trained_weights(name)]
+
+if not models_with_weights:
+    st.sidebar.error(
+        "No trained weights found! Run `tf_fundus_train.ipynb` on Google Colab "
+        "and place the `weights/` folder in the project root."
+    )
+
+for name in models_with_weights:
     if st.sidebar.checkbox(name, value=(name in ("DenseNet121", "EfficientNetV2S", "ConvNeXtTiny"))):
         selected_models.append(name)
 
-if not selected_models:
+if models_without_weights:
+    st.sidebar.caption(
+        f"Missing weights for: {', '.join(models_without_weights)}. "
+        "Train them in Colab to enable."
+    )
+
+if not selected_models and models_with_weights:
     st.sidebar.warning("Select at least one model.")
 
 st.sidebar.divider()
@@ -341,6 +422,21 @@ if uploaded_file is not None and selected_models:
                 "highest confidence."
             )
 
+    # ── TF benchmark results (from Colab training) ─────────────────────────
+    tf_results = load_tf_results()
+    if tf_results:
+        st.divider()
+        st.subheader("TensorFlow Models — Training Benchmark Results")
+        st.caption("Test-set metrics from Colab training.")
+        tf_bench_cols = st.columns(min(len(tf_results), 3))
+        tf_items = list(tf_results.items())
+        for i, (mname, mres) in enumerate(tf_items):
+            with tf_bench_cols[i % len(tf_bench_cols)]:
+                st.markdown(f"**{mname}**")
+                st.metric("Test Accuracy", f"{mres['test_accuracy']:.2%}")
+                st.metric("Inference", f"{mres['inference_ms']:.1f} ms")
+                st.caption(f"Trained {mres['epochs_trained']} epochs, best val acc {mres['best_val_accuracy']:.2%}")
+
     # ── PyTorch model results (pre-computed from Colab) ─────────────────────
     st.divider()
     st.subheader("PyTorch Models — Pre-computed Results from Colab")
@@ -404,4 +500,11 @@ if uploaded_file is not None and selected_models:
         st.table(pt_summary)
 
 elif uploaded_file is None:
-    st.info("Please upload a retinal fundus image to get started.")
+    if not models_with_weights:
+        st.warning(
+            "**Setup required:** Run `tf_fundus_train.ipynb` on Google Colab to train the models, "
+            "then upload the `weights/` folder to this project. Without trained weights, "
+            "live predictions cannot be made."
+        )
+    else:
+        st.info("Please upload a retinal fundus image to get started.")
