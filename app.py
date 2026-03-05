@@ -7,9 +7,8 @@ import tensorflow as tf
 from tensorflow.keras.applications import (
     DenseNet121,
     EfficientNetB3,
-    ResNet50,
-    InceptionV3,
-    VGG16,
+    EfficientNetV2S,
+    ConvNeXtTiny,
     MobileNetV2,
 )
 from tensorflow.keras import layers, models
@@ -53,37 +52,27 @@ MODEL_INFO = {
         "strengths": "Best accuracy/FLOP ratio, compound scaling, state-of-the-art",
         "input_note": None,
     },
-    "ResNet50": {
-        "builder": ResNet50,
-        "params": "~23M base",
+    "EfficientNetV2S": {
+        "builder": EfficientNetV2S,
+        "params": "~21M base",
         "description": (
-            "Residual connections allow training very deep networks without "
-            "degradation. A reliable baseline for retinal disease detection "
-            "in many published studies."
+            "Successor to EfficientNet with fused convolutions in early "
+            "layers and progressive learning. Trains 5-11x faster than V1 "
+            "with better accuracy on medical imaging benchmarks."
         ),
-        "strengths": "Skip connections, very deep, strong baseline, well-studied",
+        "strengths": "Faster training, improved accuracy over V1, progressive learning",
         "input_note": None,
     },
-    "InceptionV3": {
-        "builder": InceptionV3,
-        "params": "~22M base",
+    "ConvNeXtTiny": {
+        "builder": ConvNeXtTiny,
+        "params": "~28M base",
         "description": (
-            "Multi-scale feature extraction via parallel convolutions of "
-            "different kernel sizes. Good at capturing both small lesions "
-            "(microaneurysms) and large structures (optic disc)."
+            "A modernized pure-CNN that incorporates Transformer-era design "
+            "choices (large kernels, LayerNorm, GELU). Matches or beats "
+            "Vision Transformers while remaining fully convolutional. "
+            "Achieved 97.96% on retinal OCT classification."
         ),
-        "strengths": "Multi-scale features, captures varied lesion sizes",
-        "input_note": "Requires minimum 75x75 input",
-    },
-    "VGG16": {
-        "builder": VGG16,
-        "params": "~138M total",
-        "description": (
-            "Simple, uniform architecture of stacked 3x3 convolutions. "
-            "Often used as a feature extractor baseline in retinal imaging "
-            "research despite its large parameter count."
-        ),
-        "strengths": "Simple architecture, strong features, widely benchmarked",
+        "strengths": "State-of-the-art CNN, Transformer-level accuracy, modern design",
         "input_note": None,
     },
     "MobileNetV2": {
@@ -172,7 +161,7 @@ st.markdown(
 st.sidebar.header("Select Models to Compare")
 selected_models = []
 for name in MODEL_INFO:
-    if st.sidebar.checkbox(name, value=(name in ("DenseNet121", "EfficientNetB3", "ResNet50"))):
+    if st.sidebar.checkbox(name, value=(name in ("DenseNet121", "EfficientNetV2S", "ConvNeXtTiny"))):
         selected_models.append(name)
 
 if not selected_models:
